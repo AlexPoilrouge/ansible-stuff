@@ -1,0 +1,170 @@
+DOCUMENTATION = '''
+---
+module: pkgbuild
+short_description: Build Arch package from PKGBUILD using I(makepkg)
+description:
+    - Build Arch packages with the I(makepkg) from a PKGBUILD file.
+version_added: "0.0.1"
+author: Alex Poilrouge
+notes: []
+requirements: [base-devel]
+options:
+    pkgbuild:
+        description:
+            - The path (on remote), either the PKGBUILD file, or the directory
+              containing it, used to builded the package.
+        required: true
+        default: null
+
+    build_dir:
+        description:
+            - The directory (on remote) where to build the package.
+              If none is specified (default), will be the same location to
+              where the PKGBUILD is.
+        required: false
+        default: null
+
+    force:
+        description:
+            - Whether or not to build the package if it is already present in
+              I(workdir).
+        required: false
+        default: "no"
+        choices: ["yes", "no"]
+'''
+
+EXAMPLES = '''
+# Build a package
+- pkgbuild: name=/var/pkg/PKGBUILD
+
+# Build a package in a specific directory, even if already found there
+- pkgbuild: name=/var/pkg/PKGBUILD build_dir=/opt/www/repo/ force=yes
+'''
+
+
+import os
+import shutil
+
+
+MAKEPKG_PATH = "/usr/bin/makepkg"
+
+
+def checkPkgbuild(module, path):
+    buildpath= os.path.abspath(path)
+    if os.path.isdir(buildpath):
+        buildpath+= '/PKGBUILD'
+    elif not buildpath.endswith('/PKGBUILD'):
+        module.fail_json(msg="%s needs to be either the PKGBUILD, or a directory containing it" % buildpath)
+
+    if not os.path.exists(path):
+        module.fail_json(msg="'%s' isn't a valid path for pkg build" % path)
+
+    return buildpath
+
+def command_prefix():
+    sudo_user = os.environ.get('SUDO_USER')
+    return "sudo -u %s " % sudo_user
+
+def readSrcinfo(module, srcinfo_text):
+    values= {
+        'pkgbase': None,
+        'pkgver': None,
+        'pkgrel': None,
+        'arch': 'any'
+    }
+
+    for line in srcinfo_text.splitlines():
+        if "=" in line:
+            left, right= line.split('=')
+            left, right= (left.strip(), right.strip())
+
+            if left in values:
+                values[left]= right
+
+    return (values['pkgbase'], values['pkgver'], values['pkgrel'], values['arch'])
+
+def extractPkgInfos(module, pkgbuild_path, workdir_path):
+    workdir= os.path.abspath(workdir_path)
+    if not os.path.isdir(workdir):
+        os.path.makedirs(workdir)
+    if not os.path.exists(workdir):
+        module.fail_json(msg="couldn't build pkg with '%s' directory" % workdir)
+
+    if workdir != os.path.abspath(os.path.dirname(pkgbuild_path)):
+        try:
+            shutil.copy2(pkg_file_src, build_dir)
+        except Exception as err:
+            module.fail_json(msg="failed to copy build file '%s' to build directory %s: %s" % (pkgbuild_path, workdir, str(err)))
+
+    cmd = "%smakepkg --printsrcinfo" % command_prefix()
+    rc, stdout, stderr = module.run_command(cmd, check_rc=False, cwd=workdir)
+    if rc != 0:
+        module.fail_json(msg="failed to extract infos from build file '%s'" % (pkgbuild_path), stderr=stderr)
+    srcinfo_file= workdir+"/.SRCINFO"
+
+    return readSrcinfo(module, stdout)
+
+def make_package(module, pkgbuild_path, workdir):
+    cmd = "%smakepkg -scf --noconfirm" % command_prefix()    
+    rc, stdout, stderr = module.run_command(cmd, check_rc=False, cwd=workdir)
+    if rc != 0:
+        module.fail_json(msg="failed to build package in %s from %s" % (workdir, pkgbuild_path), stderr=stderr)
+
+def clean_workdir(workdir, file_cleaning=None):
+    files_to_clean= file_cleaning
+
+    if not file_cleaning:
+        files_to_clean= [
+            'PKGBUILD',
+            '.SRCINFO'
+        ]
+
+    for file in files_to_clean:
+        if os.path.exists("%s/%s" % (workdir,file)):
+            try:
+                os.remove(file)
+            except Exception as err:
+                print("Failed cleaning file '%s' that isn't present in '%s' - %s" % (file,workdir,str(err)))
+
+def main():
+    argument_spec= dict(
+        pkgbuild    =   dict(aliases=['pkg', 'path'], required=True),
+        build_dir   =   dict(aliases=['workdir']),
+        force       =   dict(default='no', choices=BOOLEANS, type='bool')
+    )
+
+    module = AnsibleModule(
+        argument_spec = argument_spec,
+        required_one_of = [['pkgbuild']],
+        supports_check_mode = True
+    )
+
+    if not os.path.exists(MAKEPKG_PATH):
+        module.fail_json(msg="cannot find makepkg, looking for %s" % (MAKEPKG_PATH))
+
+    p= module.params
+
+    pkgbuild= checkPkgbuild(module, p['pkgbuild'])
+    workdir= p['build_dir'] or os.path.dirname(pkgbuild)
+
+    pkg, version, rel, arch= extractPkgInfos(module, pkgbuild, workdir)
+    pkg_fullname= "%s-%s-%s-%s" % (pkg, version, rel, arch)
+
+    force= p['force']
+    pkgfinal_file= "%s/%s.pkg.tar.zst" % (workdir, pkg_fullname)
+    if (not force) and os.path.exists(pkgfinal_file):
+        module.exit_json(changed=False, msg='package already built', pkgbase=pkg, pkgver=version, pkgrel=rel, arch=arch, pkgfile=pkgfinal_file)
+
+    make_package(module, pkgbuild, workdir)
+    if workdir != os.path.abspath(os.path.dirname(pkgbuild)):
+        clean_workdir(workdir)
+    if not os.path.exists(pkgfinal_file):
+        module.fail_json(msg="Package '%s' wasn't built" % pkg_fullname)
+
+    module.exit_json(changed=True, msg='package built', pkgbase=pkg, pkgver=version, pkgrel=rel, arch=arch, pkgfile=pkgfinal_file)
+
+
+# import module snippets
+from ansible.module_utils.basic import *
+
+main()

@@ -1,0 +1,58 @@
+- name: My package deploy
+  hosts: ssh_test
+  vars_files:
+    - ./variables.yaml
+  become: true
+  tasks:
+    - name: Creating forge directory
+      ansible.builtin.file:
+        path: "/etc/my_package_forge/{{ item }}"
+        state: directory
+        owner: "{{ ssh_test_user }}"
+        mode: 0755
+      loop:
+        - src
+        - build
+    - name: Downloading the package source
+      ansible.builtin.get_url:
+        url: "{{ ansible_test_pkgbuild_archive_test_link }}"
+        dest: /etc/my_package_forge/src
+      register: dl_archive
+    - name: Extracting the package source
+      ansible.builtin.unarchive:
+        remote_src: true
+        src: "{{ dl_archive.dest }}"
+        dest: /etc/my_package_forge/build
+    - name: Locating the PKGBUILD
+      ansible.builtin.find:
+        paths: /etc/my_package_forge/build
+        patterns: PKGBUILD
+        recurse: yes
+      register: pkgbuild_lookup
+
+    - name: Building the package
+      pkgbuild:
+        pkgbuild: "{{ pkgbuild_lookup.files[0].path }}"
+        force: yes
+      register: built_pkg
+
+    - name: Creating repo
+      ansible.builtin.file:
+        path: "/www/site.com/repo"
+        state: directory
+        owner: "{{ ssh_test_repo_user }}"
+        mode: 0755
+    - name: Copying built package to repo
+      ansible.builtin.copy:
+        remote_src: true
+        src: "{{ built_pkg.pkgfile }}"
+        dest: "/www/site.com/repo/"
+        owner: "{{ ssh_test_repo_user }}"
+        mode: 0744
+      register: repo_copy
+    - name: Fetching the created package file
+      ansible.builtin.fetch:
+        src: "{{ repo_copy.dest }}"
+        dest: pkg_result/
+        flat: yes
+        

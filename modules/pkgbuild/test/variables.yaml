@@ -1,0 +1,6 @@
+ssh_test_port: 2222
+ssh_test_user: ansible_test
+ssh_test_password: P@55w0rd
+ssh_test_repo_user: repo
+
+ansible_test_pkgbuild_archive_test_link: https://github.com/AlexPoilrouge/myCommandsLauncher/releases/download/0.0.1/myCommandsLauncher.pkgbuild.tar.gz
